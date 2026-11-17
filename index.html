@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lite Background - Stars and Shooting Stars</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #01024F; font-family: "DejaVu Sans", Arial, sans-serif; }
+  canvas#c { position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+
+  #gear, #panel { position: fixed; transition: opacity .35s ease; pointer-events: auto; }
+  #gear {
+    top: 16px; right: 16px; width: 44px; height: 44px; border-radius: 12px;
+    border: 2px solid rgba(199,220,242,.35); background: rgba(12,10,30,.65);
+    color: #E6F4FF; font-size: 24px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #panel {
+    top: 72px; right: 16px; width: 340px; max-width: calc(100% - 32px);
+    max-height: calc(100% - 90px); box-sizing: border-box; padding: 16px 20px; overflow-y: auto;
+    background: rgba(12,10,30,.82); border: 2px solid rgba(199,220,242,.25);
+    border-radius: 18px; color: #F0F4FC; font-size: 15px; display: none;
+  }
+  #panel.open { display: block; }
+  #panel h3 { margin: 16px 0 8px; font-size: 16px; color: #C7DCF2; }
+  #panel .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  #panel input[type=range] { width: 100%; accent-color: #5BC8F0; margin: 4px 0; }
+  #panel input[type=checkbox] { width: 18px; height: 18px; accent-color: #5BC8F0; }
+  #panel select {
+    width: 100%; background: #1a1840; color: #F0F4FC; border: 1px solid rgba(199,220,242,.3);
+    border-radius: 8px; padding: 6px; font-size: 14px; margin: 4px 0 8px;
+  }
+  #panel .note { font-size: 13px; color: #9FB4CC; margin: 2px 0 4px; }
+  #swatch { height: 24px; border-radius: 8px; border: 1px solid rgba(199,220,242,.4); margin: 6px 0 4px; }
+  .rgb { display: grid; grid-template-columns: 22px 1fr 44px; gap: 8px; align-items: center; margin: 6px 0; font-size: 14px; }
+  body.ui-hidden #gear, body.ui-hidden #panel { opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<button id="gear" title="Settings">&#9881;</button>
+<div id="panel">
+  <h3 style="margin-top:0">Scene</h3>
+  <label class="row"><span>Stars</span><input type="checkbox" id="starsOn" checked></label>
+  <label class="row"><span>Dust</span><input type="checkbox" id="dustOn" checked></label>
+  <label class="row"><span>Shooting stars</span><input type="checkbox" id="shootOn" checked></label>
+
+  <h3>Shooting star rate <span id="freqLabel" style="float:right">4 / min</span></h3>
+  <input type="range" id="freq" min="0.5" max="20" step="0.5" value="4">
+  <div class="note" id="freqInfo"></div>
+
+  <h3>Time of day <span id="timeLabel" style="float:right">--:--</span></h3>
+  <input type="range" id="time" min="0" max="24" step="0.05" value="12">
+  <label class="row"><span>Use real clock</span><input type="checkbox" id="liveClock" checked></label>
+
+  <h3>Colors</h3>
+  <select id="colorMode">
+    <option value="auto">Auto by time of day</option>
+    <option value="manual">Manual sliders</option>
+  </select>
+  <select id="colorTarget">
+    <option value="top">Sky top</option>
+    <option value="bot">Sky bottom</option>
+    <option value="light">Stars and shooting stars</option>
+  </select>
+  <div id="swatch"></div>
+  <div class="rgb"><span style="color:#ff8a8a">R</span><input type="range" id="sR" min="0" max="255" value="0"><span id="vR">0</span></div>
+  <div class="rgb"><span style="color:#8affa0">G</span><input type="range" id="sG" min="0" max="255" value="0"><span id="vG">0</span></div>
+  <div class="rgb"><span style="color:#8ac8ff">B</span><input type="range" id="sB" min="0" max="255" value="0"><span id="vB">0</span></div>
+</div>
+
+<script>
+const TAU = Math.PI * 2;
+const $ = id => document.getElementById(id);
+const canvas = $('c');
+const ctx = canvas.getContext('2d');
+
+const ui = {
+  gear: $('gear'), panel: $('panel'),
+  starsOn: $('starsOn'), dustOn: $('dustOn'), shootOn: $('shootOn'),
+  freq: $('freq'), freqLabel: $('freqLabel'), freqInfo: $('freqInfo'),
+  time: $('time'), timeLabel: $('timeLabel'), liveClock: $('liveClock'),
+  colorMode: $('colorMode'), colorTarget: $('colorTarget'), swatch: $('swatch'),
+  sl: { R: $('sR'), G: $('sG'), B: $('sB') },
+  val: { R: $('vR'), G: $('vG'), B: $('vB') },
+};
+
+// ---------- Helpers ----------
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const mix3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const rgb = (c, al = 1) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${al})`;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const fmt = h => {
+  h = ((h % 24) + 24) % 24;
+  const hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+  return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+};
+
+// ---------- Time-of-day colors: hour, sky top, sky bottom, star light ----------
+const KEYS = [
+  { h: 0,  top: [1,2,41],    bot: [10,29,74],    light: [60,111,208] },
+  { h: 5,  top: [13,11,61],  bot: [43,46,110],   light: [122,140,240] },
+  { h: 7,  top: [26,42,122], bot: [242,139,106], light: [255,180,138] },
+  { h: 10, top: [5,48,110],  bot: [58,175,216],  light: [138,231,252] },
+  { h: 12, top: [1,2,79],    bot: [24,188,218],  light: [138,231,252] },
+  { h: 16, top: [10,58,138], bot: [79,209,224],  light: [184,245,255] },
+  { h: 18, top: [30,20,80],  bot: [232,128,95],  light: [255,192,160] },
+  { h: 20, top: [10,11,58],  bot: [106,74,158],  light: [154,140,255] },
+  { h: 24, top: [1,2,41],    bot: [10,29,74],    light: [60,111,208] },
+];
+function keyAt(h) {
+  h = ((h % 24) + 24) % 24;
+  for (let i = 0; i < KEYS.length - 1; i++) {
+    const a = KEYS[i], b = KEYS[i + 1];
+    if (h >= a.h && h <= b.h) {
+      const t = smooth(a.h, b.h, h);
+      return { top: mix3(a.top, b.top, t), bot: mix3(a.bot, b.bot, t), light: mix3(a.light, b.light, t) };
+    }
+  }
+  return keyAt(0);
+}
+// Night amount: 1 at midnight, 0 at midday (used to make stars brighter at night)
+const nightAmount = h => 1 - smooth(-0.1, 0.25, Math.sin(TAU * (h - 6) / 24));
+
+// ---------- State ----------
+const state = {
+  stars: true, dust: true, shoot: true,
+  freq: 4,                      // shooting stars per minute
+  hour: 12, live: true,         // live = follow the real clock (default)
+  mode: 'auto',                 // colors follow time of day (default)
+  target: 'top',
+  manual: keyAt(12),
+  panelOpen: false,
+};
+const currentColors = () => (state.mode === 'auto' ? keyAt(state.hour) : state.manual);
+
+function syncSliders() {
+  const c = currentColors()[state.target];
+  ['R', 'G', 'B'].forEach((ch, i) => {
+    const v = Math.round(c[i]);
+    ui.sl[ch].value = v;
+    ui.val[ch].textContent = v;
+  });
+}
+function setMode(m) {
+  if (m === 'manual' && state.mode === 'auto') state.manual = keyAt(state.hour);
+  state.mode = m;
+  ui.colorMode.value = m;
+  syncSliders();
+}
+function updateFreqInfo() {
+  ui.freqLabel.textContent = state.freq.toFixed(1) + ' / min';
+  ui.freqInfo.textContent = `About one every ${Math.round(60 / state.freq)} seconds, at a random spot in the sky.`;
+}
+
+// ---------- Screen-size scaling: the scene is laid out in real screen pixels ----------
+let W = 0, H = 0, DPR = 1, U = 1;     // U = size factor relative to a 1920x1080 screen
+let stars = [], dust = [];
+const shots = [];
+
+function newStar() {
+  return { fx: Math.random(), fy: Math.random(), r: rnd(0.5, 2.4), tw: rnd(0.6, 2.8), ph: rnd(0, TAU),
+           vx: rnd(-0.9, 0.9), vy: -rnd(1.2, 4.8) };     // px per second at 1080p
+}
+function newDust() {
+  return { fx: Math.random(), fy: Math.random(), r: rnd(3, 12), ph: rnd(0, TAU),
+           vx: rnd(-3, 3), vy: rnd(-3, 3) };
+}
+function resize() {
+  DPR = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  U = clamp(Math.sqrt(W * H) / 1440, 0.5, 2);
+  const area = (W * H) / (1920 * 1080);
+  stars = Array.from({ length: clamp(Math.round(220 * area), 40, 700) }, newStar);
+  dust = Array.from({ length: clamp(Math.round(28 * area), 8, 120) }, newDust);
+}
+window.addEventListener('resize', resize);
+
+// ---------- Background ----------
+function drawBackground(C) {
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0.00, rgb(C.top));
+  g.addColorStop(0.35, rgb(mix3(C.top, C.bot, 0.35)));
+  g.addColorStop(0.65, rgb(mix3(C.top, C.bot, 0.70)));
+  g.addColorStop(1.00, rgb(C.bot));
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ---------- Stars and dust ----------
+function updateStars(dt) {
+  for (const s of stars) {
+    s.fx = (s.fx + s.vx * U * dt / W + 1) % 1;
+    s.fy = (s.fy + s.vy * U * dt / H + 1) % 1;
+  }
+}
+function drawStars(t, night, C) {
+  const k = 0.3 + 0.7 * night;
+  const col = mix3(C.light, [255, 255, 255], 0.5);
+  for (const s of stars) {
+    const a = (0.25 + 0.7 * (0.5 + 0.5 * Math.sin(t * s.tw + s.ph))) * k;
+    ctx.beginPath();
+    ctx.arc(s.fx * W, s.fy * H, s.r * U, 0, TAU);
+    ctx.fillStyle = rgb(col, a);
+    ctx.fill();
+  }
+}
+function updateDust(dt) {
+  for (const d of dust) {
+    d.fx = (d.fx + d.vx * U * dt / W + 1) % 1;
+    d.fy = (d.fy + d.vy * U * dt / H + 1) % 1;
+  }
+}
+function drawDust(t) {
+  for (const d of dust) {
+    const a = 0.06 + 0.06 * Math.sin(t * 0.8 + d.ph);
+    ctx.beginPath();
+    ctx.arc(d.fx * W, d.fy * H, d.r * U, 0, TAU);
+    ctx.fillStyle = `rgba(190,235,255,${a})`;
+    ctx.fill();
+  }
+}
+
+// ---------- Shooting stars ----------
+// Each one starts at a random spot, streaks down at an angle, and fades out.
+function spawnShot() {
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const ang = rnd(18, 42) * Math.PI / 180;
+  shots.push({
+    x: Math.random() * W, y: Math.random() * H * 0.9,
+    dx: Math.cos(ang) * dir, dy: Math.sin(ang),
+    speed: rnd(900, 1400) * U, len: rnd(140, 260) * U,
+    life: rnd(0.7, 1.1), age: 0,
+  });
+}
+let nextShot = 0;
+function scheduleShot(now) {
+  // Random gaps (Poisson-style) so they don't look like a metronome
+  nextShot = now + -Math.log(1 - Math.random()) * (60000 / state.freq);
+}
+function updateShots(dt, C) {
+  const col = mix3(C.light, [255, 255, 255], 0.6);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const s = shots[i];
+    s.age += dt;
+    if (s.age >= s.life) { shots.splice(i, 1); continue; }
+    const dist = s.speed * s.age;
+    const hx = s.x + s.dx * dist, hy = s.y + s.dy * dist;
+    const tx = hx - s.dx * s.len, ty = hy - s.dy * s.len;
+    const a = Math.sin(Math.PI * s.age / s.life);
+    const g = ctx.createLinearGradient(tx, ty, hx, hy);
+    g.addColorStop(0, rgb(col, 0));
+    g.addColorStop(1, rgb(col, a));
+    ctx.lineWidth = 2 * U;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(tx, ty);
+    ctx.lineTo(hx, hy);
+    ctx.stroke();
+    const glow = ctx.createRadialGradient(hx, hy, 0, hx, hy, 14 * U);
+    glow.addColorStop(0, rgb([255, 255, 255], a));
+    glow.addColorStop(1, rgb(col, 0));
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(hx, hy, 14 * U, 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ---------- UI sync ----------
+function updateUI(C) {
+  ui.timeLabel.textContent = fmt(state.hour);
+  ui.time.value = state.hour;
+  ui.swatch.style.background = rgb(C[state.target]);
+  if (state.mode === 'auto') syncSliders();
+}
+
+// ---------- Controls ----------
+ui.gear.onclick = () => {
+  state.panelOpen = !state.panelOpen;
+  ui.panel.classList.toggle('open', state.panelOpen);
+};
+ui.starsOn.onchange = e => { state.stars = e.target.checked; };
+ui.dustOn.onchange = e => { state.dust = e.target.checked; };
+ui.shootOn.onchange = e => {
+  state.shoot = e.target.checked;
+  if (state.shoot) scheduleShot(performance.now());
+  else shots.length = 0;
+};
+ui.freq.oninput = e => { state.freq = +e.target.value; updateFreqInfo(); };
+ui.freq.onchange = () => { if (state.shoot) scheduleShot(performance.now()); };   // apply new rate right away
+ui.time.oninput = e => { state.hour = parseFloat(e.target.value); };
+ui.liveClock.onchange = e => {
+  state.live = e.target.checked;
+  ui.time.disabled = state.live;
+};
+ui.colorMode.onchange = e => setMode(e.target.value);
+ui.colorTarget.onchange = e => { state.target = e.target.value; syncSliders(); };
+['R', 'G', 'B'].forEach((ch, i) => {
+  ui.sl[ch].oninput = e => {
+    if (state.mode === 'auto') setMode('manual');
+    state.manual[state.target][i] = +e.target.value;
+    ui.val[ch].textContent = e.target.value;
+  };
+});
+
+// Buttons fade out after 3 seconds without pointer movement, and return on movement
+let hideTimer = null;
+function wakeUI() {
+  document.body.classList.remove('ui-hidden');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => document.body.classList.add('ui-hidden'), 3000);
+}
+['pointermove', 'pointerdown', 'wheel', 'keydown', 'touchstart'].forEach(ev =>
+  window.addEventListener(ev, wakeUI, { passive: true }));
+
+// ---------- Init ----------
+resize();
+ui.liveClock.checked = state.live;
+ui.time.disabled = state.live;
+ui.colorMode.value = state.mode;
+syncSliders();
+updateFreqInfo();
+wakeUI();
+scheduleShot(performance.now());
+
+// ---------- Main loop ----------
+let last = performance.now(), clock = 0;
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+  clock += dt;
+
+  if (state.live) {
+    const d = new Date();
+    state.hour = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+  }
+
+  const C = currentColors();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  drawBackground(C);
+
+  if (state.dust) { updateDust(dt); drawDust(clock); }
+  if (state.stars) { updateStars(dt); drawStars(clock, nightAmount(state.hour), C); }
+
+  if (state.shoot) {
+    if (now >= nextShot) { spawnShot(); scheduleShot(now); }
+  }
+  updateShots(dt, C);
+
+  updateUI(C);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
